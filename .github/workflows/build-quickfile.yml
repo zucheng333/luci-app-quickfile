@@ -1,0 +1,67 @@
+name: Build luci-app-quickfile IPK
+
+on:
+  workflow_dispatch:
+    inputs:
+      openwrt_version:
+        description: '要编译的 OpenWrt 版本标签 (例如: v24.10.0)'
+        required: true
+        default: 'v24.10.0'
+        type: string
+      target_arch:
+        description: '目标架构路径 (例如: x86/64, ramips/mt7621)'
+        required: true
+        default: 'x86/64'
+        type: string
+  schedule:
+    - cron: '0 0 * * 0'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set variables
+      id: vars
+      run: |
+        OPENWRT_VERSION="${{ github.event.inputs.openwrt_version }}"
+        if [ -z "$OPENWRT_VERSION" ]; then
+          OPENWRT_VERSION="v24.10.0"
+        fi
+        TARGET_PATH="${{ github.event.inputs.target_arch }}"
+        if [ -z "$TARGET_PATH" ]; then
+          TARGET_PATH="x86/64"
+        fi
+        echo "openwrt_version=${OPENWRT_VERSION}" >> $GITHUB_OUTPUT
+        echo "target_path=${TARGET_PATH}" >> $GITHUB_OUTPUT
+
+    - name: Download OpenWrt SDK
+      run: |
+        VERSION="${{ steps.vars.outputs.openwrt_version }}"
+        TARGET="${{ steps.vars.outputs.target_path }}"
+        SDK_URL="https://downloads.openwrt.org/releases/${VERSION}/targets/${TARGET}/openwrt-sdk-${VERSION}-${TARGET//\//-}_gcc-*_musl.Linux-x86_64.tar.xz"
+        echo "Downloading SDK for ${VERSION} / ${TARGET}"
+        wget -q -O sdk.tar.xz $SDK_URL 2>&1 || { echo "Failed to download SDK"; exit 1; }
+        mkdir sdk && tar -xJf sdk.tar.xz -C sdk --strip-components=1
+
+    - name: Prepare package
+      run: |
+        mkdir -p sdk/package/luci-app-quickfile
+        cp -r ./* sdk/package/luci-app-quickfile/
+        cd sdk
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
+
+    - name: Build package
+      run: |
+        cd sdk
+        make defconfig
+        make package/luci-app-quickfile/compile V=s
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: quickfile-ipk-${{ steps.vars.outputs.target_path }}-${{ steps.vars.outputs.openwrt_version }}
+        path: sdk/bin/packages/*/base/luci-app-quickfile*.ipk
