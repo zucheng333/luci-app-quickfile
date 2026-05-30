@@ -1,0 +1,47 @@
+name: Build luci-app-quickfile IPK
+
+on:
+  workflow_dispatch:
+    inputs:
+      openwrt_version:
+        description: 'OpenWrt 版本 (例如: 24.10.0, 23.05.5)'
+        required: true
+        default: '24.10.0'
+      target_arch:
+        description: '目标架构路径 (例如: x86/64, ramips/mt7621)'
+        required: true
+        default: 'x86/64'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build packages with SDK
+        uses: openwrt/gh-action-sdk@main
+        env:
+          OPENWRT_VERSION: ${{ github.event.inputs.openwrt_version }}
+          ARCH: ${{ github.event.inputs.target_arch }}
+          FEEDNAME: quickfile
+          PACKAGES: quickfile luci-app-quickfile luci-i18n-quickfile-zh-cn
+          # 可选：增加调试输出
+          # NO_REFRESH_CHECK: true
+
+      - name: Collect artifacts
+        run: |
+          ARCH="${{ github.event.inputs.target_arch }}"
+          # 将路径中的 '/' 替换为 '-' 用于 artifact 名称
+          SAFE_ARCH=$(echo "$ARCH" | tr '/' '-')
+          mkdir -p ipk
+          # 查找编译出的 ipk 文件（可能在 bin/packages/... 下）
+          find bin -name "*.ipk" -exec cp -v {} ipk/ \;
+          # 显示找到的文件
+          ls -la ipk/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: quickfile-${{ github.event.inputs.openwrt_version }}-${{ SAFE_ARCH }}
+          path: ipk/
