@@ -1,4 +1,3 @@
-
 name: Build luci-app-quickfile IPK
 
 on:
@@ -9,44 +8,50 @@ on:
         required: true
         default: '24.10.0'
       target_arch:
-        description: '目标架构路径 (例如: x86/64, x86_64, ramips/mt7621)'
+        description: '目标架构 (例如: x86/64, x86_64, ramips/mt7621)'
         required: true
         default: 'x86/64'
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - name: Convert architecture name (replace '/' with '_')
+      - name: Convert architecture and prepare ARCH string
         id: arch_conv
         run: |
           RAW_ARCH="${{ github.event.inputs.target_arch }}"
           SAFE_ARCH=$(echo "$RAW_ARCH" | tr '/' '_')
+          OPENWRT_VER="${{ github.event.inputs.openwrt_version }}"
+          # 提取主版本号（如 24.10.0 -> 24.10）
+          SDK_VER=$(echo "$OPENWRT_VER" | cut -d. -f1,2)
           echo "safe_arch=${SAFE_ARCH}" >> $GITHUB_OUTPUT
-          echo "Input architecture: ${RAW_ARCH} -> Converted: ${SAFE_ARCH}"
+          echo "sdk_ver=${SDK_VER}" >> $GITHUB_OUTPUT
+          echo "ARCH_STRING=${SAFE_ARCH}-openwrt-${SDK_VER}" >> $GITHUB_OUTPUT
 
       - name: Build packages with SDK
         uses: openwrt/gh-action-sdk@main
         env:
-          OPENWRT_VERSION: ${{ github.event.inputs.openwrt_version }}
-          ARCH: ${{ steps.arch_conv.outputs.safe_arch }}
+          ARCH: ${{ steps.arch_conv.outputs.ARCH_STRING }}
           FEEDNAME: quickfile
           PACKAGES: quickfile luci-app-quickfile luci-i18n-quickfile-zh-cn
+          NO_REFRESH_CHECK: true
+          INDEX: 1
 
-      - name: Collect built packages
-        id: collect
+      - name: Collect packages
         run: |
-          mkdir -p ipk
-          # 查找所有生成的 .ipk 文件
-          find bin -name "*.ipk" -exec cp -v {} ipk/ \;
-          echo "Files collected:"
-          ls -la ipk/
+          mkdir -p dist
+          # 查找所有生成的 .ipk 文件（路径可能为 bin/packages/*/quickfile/*.ipk）
+          find bin -name "*.ipk" -exec cp -v {} dist/ \;
+          ls -la dist/
 
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+      - name: Upload artifact
+        uses: actions/upload-artifact@v6
         with:
           name: quickfile-${{ github.event.inputs.openwrt_version }}-${{ steps.arch_conv.outputs.safe_arch }}
-          path: ipk/
+          path: dist/
+          if-no-files-found: error
