@@ -16,8 +16,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Build packages with SDK
         uses: openwrt/gh-action-sdk@main
@@ -26,22 +25,18 @@ jobs:
           ARCH: ${{ github.event.inputs.target_arch }}
           FEEDNAME: quickfile
           PACKAGES: quickfile luci-app-quickfile luci-i18n-quickfile-zh-cn
-          # 可选：增加调试输出
-          # NO_REFRESH_CHECK: true
 
       - name: Collect artifacts
+        id: collect
         run: |
           ARCH="${{ github.event.inputs.target_arch }}"
-          # 将路径中的 '/' 替换为 '-' 用于 artifact 名称
           SAFE_ARCH=$(echo "$ARCH" | tr '/' '-')
+          echo "safe_arch=${SAFE_ARCH}" >> $GITHUB_OUTPUT
           mkdir -p ipk
-          # 查找编译出的 ipk 文件（可能在 bin/packages/... 下）
           find bin -name "*.ipk" -exec cp -v {} ipk/ \;
-          # 显示找到的文件
-          ls -la ipk/
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: quickfile-${{ github.event.inputs.openwrt_version }}-${{ SAFE_ARCH }}
+          name: quickfile-${{ github.event.inputs.openwrt_version }}-${{ steps.collect.outputs.safe_arch }}
           path: ipk/
