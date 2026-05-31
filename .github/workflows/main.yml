@@ -34,8 +34,9 @@ jobs:
           echo "ARCH_STRING=${SAFE_ARCH}-openwrt-${SDK_VER}" >> $GITHUB_OUTPUT
 
       - name: Build packages with SDK
-        uses: openwrt/gh-action-sdk@main
+        uses: openwrt/gh-action-sdk@v5  # 或 @v7
         env:
+          NO_REFRESH_CHECK: true
           ARCH: ${{ steps.arch_conv.outputs.ARCH_STRING }}
           FEEDNAME: quickfile
           PACKAGES: quickfile luci-app-quickfile luci-i18n-quickfile-zh-cn
