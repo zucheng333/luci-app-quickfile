@@ -12,44 +12,48 @@ on:
         required: true
         default: 'x86/64'
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
 
-      - name: Convert architecture and prepare ARCH string
+      # 修复 shfmt 缺失问题
+      - name: Install shfmt
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shfmt
+
+      # 架构转换 (x86/64 -> x86_64)
+      - name: Convert architecture
         id: arch_conv
         run: |
           RAW_ARCH="${{ github.event.inputs.target_arch }}"
           SAFE_ARCH=$(echo "$RAW_ARCH" | tr '/' '_')
           OPENWRT_VER="${{ github.event.inputs.openwrt_version }}"
-          # 提取主版本号（如 24.10.0 -> 24.10）
           SDK_VER=$(echo "$OPENWRT_VER" | cut -d. -f1,2)
           echo "safe_arch=${SAFE_ARCH}" >> $GITHUB_OUTPUT
           echo "sdk_ver=${SDK_VER}" >> $GITHUB_OUTPUT
           echo "ARCH_STRING=${SAFE_ARCH}-openwrt-${SDK_VER}" >> $GITHUB_OUTPUT
 
+      # 编译 (环境变量仅在此步骤定义，避免重复)
       - name: Build packages with SDK
-        uses: openwrt/gh-action-sdk@v5  # 或 @v7
+        uses: openwrt/gh-action-sdk@main
         env:
-          NO_REFRESH_CHECK: true
           ARCH: ${{ steps.arch_conv.outputs.ARCH_STRING }}
           FEEDNAME: quickfile
           PACKAGES: quickfile luci-app-quickfile luci-i18n-quickfile-zh-cn
           NO_REFRESH_CHECK: true
           INDEX: 1
 
+      # 收集产物
       - name: Collect packages
         run: |
           mkdir -p dist
-          # 查找所有生成的 .ipk 文件（路径可能为 bin/packages/*/quickfile/*.ipk）
           find bin -name "*.ipk" -exec cp -v {} dist/ \;
           ls -la dist/
 
+      # 上传产物
       - name: Upload artifact
         uses: actions/upload-artifact@v6
         with:
