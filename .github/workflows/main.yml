@@ -1,63 +1,218 @@
-name: Build luci-app-quickfile IPK
+name: Build luci-app-quickfile  & Release
 
 on:
   workflow_dispatch:
-    inputs:
-      openwrt_version:
-        description: 'OpenWrt 版本 (例如: 24.10.0, 23.05.5)'
-        required: true
-        default: '24.10.0'
-      target_arch:
-        description: '目标架构 (例如: x86/64, x86_64, ramips/mt7621)'
-        required: true
-        default: 'x86/64'
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   build:
+    name: ${{ matrix.arch }} · SDK ${{ matrix.sdk }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch:
+          - aarch64_cortex-a53
+          - aarch64_generic
+          - x86_64
+        sdk:
+          - "24.10"
+
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      # 关键修复: 显式安装 shfmt, 从根源上解决错误
-      - name: Install shfmt
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y shfmt
-
-      - name: Convert architecture (x86/64 -> x86_64)
-        id: arch_conv
-        run: |
-          RAW_ARCH="${{ github.event.inputs.target_arch }}"
-          SAFE_ARCH=$(echo "$RAW_ARCH" | tr '/' '_')
-          OPENWRT_VER="${{ github.event.inputs.openwrt_version }}"
-          # 提取主版本号 (例如 24.10.0 -> 24.10)
-          SDK_VER=$(echo "$OPENWRT_VER" | cut -d. -f1,2)
-          echo "safe_arch=${SAFE_ARCH}" >> $GITHUB_OUTPUT
-          echo "sdk_ver=${SDK_VER}" >> $GITHUB_OUTPUT
-          echo "ARCH_STRING=${SAFE_ARCH}-openwrt-${SDK_VER}" >> $GITHUB_OUTPUT
-
-      # 使用更稳定的 v7 标签，并设置环境变量跳过检查
-      - name: Build packages with SDK
-        uses: openwrt/gh-action-sdk@v7
+      - name: Build packages
+        uses: openwrt/gh-action-sdk@main
         env:
-          ARCH: ${{ steps.arch_conv.outputs.ARCH_STRING }}
+          ARCH: ${{ matrix.arch }}-openwrt-${{ matrix.sdk }}
           FEEDNAME: quickfile
           PACKAGES: quickfile luci-app-quickfile luci-i18n-quickfile-zh-cn
-          NO_REFRESH_CHECK: true   # 禁用补丁刷新检查
-          NO_SHFMT_CHECK: true     # 禁用 shfmt 格式化检查
+          NO_REFRESH_CHECK: true
           INDEX: 1
 
       - name: Collect packages
         run: |
-          mkdir -p dist
-          # 查找所有生成的 .ipk 文件
-          find bin -name "*.ipk" -exec cp -v {} dist/ \;
-          echo "=== Collected packages ==="
-          ls -la dist/
+          ARCH="${{ matrix.arch }}"
+          mkdir -p dist/release dist/feed
+
+          for f in bin/packages/${ARCH}/quickfile/*.ipk; do
+            [ -f "$f" ] || continue
+            [[ "$(basename $f)" == Packages* ]] && continue
+            base=$(basename "$f" .ipk)
+            safe="${base//\~/.}"
+            cp -v "$f" "dist/release/${safe}.ipk"
+            cp -v "$f" dist/feed/
+          done
+
+          for f in bin/packages/${ARCH}/quickfile/*.apk; do
+            [ -f "$f" ] || continue
+            [[ "$(basename $f)" == Packages* ]] && continue
+            base=$(basename "$f" .apk)
+            safe="${base//\~/.}"
+            cp -v "$f" "dist/release/${safe}-${ARCH}.apk"
+            cp -v "$f" dist/feed/
+          done
+
+          for f in bin/packages/${ARCH}/quickfile/Packages* bin/packages/${ARCH}/quickfile/APKINDEX*; do
+            [ -f "$f" ] || continue
+            cp -v "$f" dist/feed/
+          done
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
-          name: quickfile-${{ github.event.inputs.openwrt_version }}-${{ steps.arch_conv.outputs.safe_arch }}
+          name: packages-sdk${{ matrix.sdk }}-${{ matrix.arch }}
           path: dist/
-          if-no-files-found: error
+          if-no-files-found: ignore
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v6
+        with:
+          path: all-artifacts
+          pattern: packages-*
+
+      - name: Flatten release files
+        run: |
+          mkdir -p dist
+          find all-artifacts -path "*/release/*" -type f -exec cp -v {} dist/ \;
+
+      - name: Determine tag
+        id: meta
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "tag=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+            echo "prerelease=false" >> $GITHUB_OUTPUT
+          else
+            echo "tag=v$(date -u +%Y.%m.%d)" >> $GITHUB_OUTPUT
+            echo "prerelease=${{ github.event.inputs.prerelease }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Generate Release Notes
+        env:
+          TAG: ${{ steps.meta.outputs.tag }}
+          REPO: ${{ github.repository }}
+        run: |
+          BASE="https://github.com/${REPO}/releases/download/${TAG}"
+          ARCHS="aarch64_cortex-a53 aarch64_generic x86_64"
+          PREVIOUS_TAG="$(git tag --sort=-creatordate | grep '^v' | grep -v "^${TAG}$" | head -1 || true)"
+
+          if [ -n "$PREVIOUS_TAG" ]; then
+            RANGE="${PREVIOUS_TAG}..HEAD"
+          else
+            RANGE="HEAD"
+          fi
+
+          git log --format='%s%x1f%b%x1e' "$RANGE" > commits.raw
+
+          write_section() {
+            title="$1"
+            pattern="$2"
+            awk -v title="$title" -v pattern="$pattern" '
+              BEGIN {
+                RS = "\036"
+                FS = "\037"
+                count = 0
+              }
+              {
+                subject = $1
+                body = $2
+                gsub(/^[[:space:]]+|[[:space:]]+$/, "", subject)
+                if (subject == "" || subject ~ /^Merge /) {
+                  next
+                }
+                if (subject ~ pattern) {
+                  item = subject
+                  sub(/^[a-z]+([(][^)]+[)])?!?:[[:space:]]*/, "", item)
+                  issue = ""
+                  text = subject "\n" body
+                  if (match(text, /(([Ff]ixes|[Cc]loses|[Rr]esolves|[Rr]efs)[[:space:]]+#[0-9]+)/)) {
+                    issue = " (" substr(text, RSTART, RLENGTH) ")"
+                  } else if (match(text, /#[0-9]+/)) {
+                    issue = " (" substr(text, RSTART, RLENGTH) ")"
+                  }
+                  lines[++count] = "- " item issue
+                }
+              }
+              END {
+                if (count > 0) {
+                  print "## " title
+                  print ""
+                  for (i = 1; i <= count; i++) {
+                    print lines[i]
+                  }
+                  print ""
+                }
+              }
+            ' commits.raw
+          }
+
+          {
+            echo "## 📦 SDK 24.10 · (IPK)"
+            echo ""
+            echo "| 架构 | quickfile | luci-app-quickfile | luci-i18n-quickfile-zh-cn |"
+            echo "| :--- | :--- | :--- | :--- |"
+            luci_ipk=$(ls dist/luci-app-quickfile_*_all.ipk 2>/dev/null | head -1)
+            luci_ipk_link=$( [ -n "$luci_ipk" ] && echo "[$(basename $luci_ipk)](${BASE}/$(basename $luci_ipk))" || echo "—" )
+            luci_i18n_ipk=$(ls dist/luci-i18n-quickfile-zh-cn_*_all.ipk 2>/dev/null | head -1)
+            luci_i18n_link=$( [ -n "$luci_i18n_ipk" ] && echo "[$(basename $luci_i18n_ipk)](${BASE}/$(basename $luci_i18n_ipk))" || echo "—" )
+
+            for arch in $ARCHS; do
+              f=$(ls dist/quickfile_*_${arch}.ipk 2>/dev/null | head -1)
+              link=$( [ -n "$f" ] && echo "[$(basename $f)](${BASE}/$(basename $f))" || echo "—" )
+              echo "| \`${arch}\` | ${link} | ${luci_ipk_link} | ${luci_i18n_link} |"
+            done
+
+            echo ""
+            echo "## 📦 SDK 25.12 · (APK)"
+            echo ""
+            echo "| 架构 | quickfile | luci-app-quickfile | luci-i18n-quickfile-zh-cn |"
+            echo "| :--- | :--- | :--- | :--- |"
+            for arch in $ARCHS; do
+              f_core=$(ls dist/quickfile-*-${arch}.apk 2>/dev/null | head -1)
+              f_luci=$(ls dist/luci-app-quickfile-*-${arch}.apk 2>/dev/null | head -1)
+              f_i18n=$(ls dist/luci-i18n-quickfile-zh-cn-*-${arch}.apk 2>/dev/null | head -1)
+              link_core=$( [ -n "$f_core" ] && echo "[$(basename $f_core)](${BASE}/$(basename $f_core))" || echo "—" )
+              link_luci=$( [ -n "$f_luci" ] && echo "[$(basename $f_luci)](${BASE}/$(basename $f_luci))" || echo "—" )
+              link_i18n=$( [ -n "$f_i18n" ] && echo "[$(basename $f_i18n)](${BASE}/$(basename $f_i18n))" || echo "—" )
+              echo "| \`${arch}\` | ${link_core} | ${link_luci} | ${link_i18n} |"
+            done
+          } > release_notes.md
+
+          cat release_notes.md
+
+      - name: Replace Existing Manual Release
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          REPO: ${{ github.repository }}
+        run: |
+          if gh release view "$TAG" -R "$REPO" >/dev/null 2>&1; then
+            gh release delete "$TAG" -R "$REPO" --yes --cleanup-tag
+          fi
+
+      - name: Publish Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: Release ${{ steps.meta.outputs.tag }}
+          body_path: release_notes.md
+          prerelease: ${{ steps.meta.outputs.prerelease }}
+          files: dist/**
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
